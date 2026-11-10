@@ -1,0 +1,131 @@
+<!doctype html>
+<html lang="it"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Registra giro</title>
+<style>
+:root{--bg:#e8ebec;--panel:#f6f7f7;--ink:#161b1e;--muted:#5a666b;--line:#cbd2d5;--ok:#1f7a5c;--bad:#b3261e;--accent:#c4202f}
+@media (prefers-color-scheme:dark){:root{--bg:#0f1417;--panel:#171e22;--ink:#e7eef0;--muted:#93a1a7;--line:#2b363c;--ok:#5fc28a;--bad:#ff7a70;--accent:#ff4a58;color-scheme:dark}}
+*{box-sizing:border-box}
+body{margin:0;background:var(--bg);color:var(--ink);font:16px/1.45 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;padding:20px max(16px,env(safe-area-inset-right,0px)) 40px max(16px,env(safe-area-inset-left,0px))}
+main{max-width:760px;margin:0 auto;display:grid;gap:14px}
+h1{font-size:26px;margin:0;letter-spacing:.02em}
+p{margin:0}.muted{color:var(--muted);font-size:14px}
+.card{background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:14px;display:grid;gap:10px}
+button{font:600 16px system-ui,sans-serif;color:var(--ink);background:var(--panel);border:1px solid var(--line);border-radius:6px;padding:10px 14px;min-height:46px;cursor:pointer}
+button.big{font-size:26px;min-height:84px;letter-spacing:.04em}
+button.primary{background:var(--ink);color:var(--bg);border-color:var(--ink)}
+button:disabled{opacity:.45;cursor:default}
+.row{display:flex;flex-wrap:wrap;gap:10px}
+#st{font-weight:600}
+.tiles{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:10px}
+@media (max-width:520px){.tiles{grid-template-columns:repeat(2,minmax(0,1fr))}}
+.t{border:1px solid var(--line);border-radius:6px;padding:8px 10px}
+.t small{display:block;color:var(--muted);font-size:12px;letter-spacing:.08em;text-transform:uppercase}
+.t b{font-size:30px;font-variant-numeric:tabular-nums}
+pre{margin:0;max-height:340px;overflow:auto;background:var(--bg);border:1px solid var(--line);border-radius:6px;padding:10px;font:12.5px/1.4 ui-monospace,Menlo,Consolas,monospace;white-space:pre-wrap;word-break:break-word}
+</style></head>
+<body><main>
+<header><h1>Registra giro</h1>
+<p class="muted">Versione 3. Un solo tasto, un solo file.</p></header>
+
+<section class="card">
+<p class="muted">Auto accesa, Car Scanner chiuso. Premi una volta all'inizio e una volta alla fine.</p>
+<button class="primary big" id="go">AVVIA</button>
+<p id="st">Pronto.</p>
+<button id="rec" hidden>Recupera il giro precedente</button>
+</section>
+
+<section class="card">
+<div class="tiles">
+<div class="t"><small>Giri</small><b id="v_rpm">–</b></div>
+<div class="t"><small>Velocità</small><b id="v_spd">–</b></div>
+<div class="t"><small>Pedale %</small><b id="v_ped">–</b></div>
+<div class="t"><small>Carico %</small><b id="v_ld">–</b></div>
+<div class="t"><small>MAF g/s</small><b id="v_maf">–</b></div>
+<div class="t"><small>Liquido °C</small><b id="v_tmp">–</b></div>
+<div class="t" id="gpsbox"><small>GPS (tocca per riprovare)</small><b id="v_gps" style="font-size:20px">–</b></div>
+</div>
+<p class="muted" id="rate">Letture al secondo: –</p>
+</section>
+
+<details class="card"><summary>Dettagli tecnici</summary><pre id="log"></pre></details>
+</main>
+<script>
+const $=id=>document.getElementById(id);
+const t0=Date.now(); const logEl=$('log');
+function log(s){ const t=((Date.now()-t0)/1000).toFixed(1).padStart(6); logEl.textContent+=t+'  '+s+'\n'; logEl.scrollTop=logEl.scrollHeight; }
+function status(s,bad){ $('st').textContent=s; $('st').style.color=bad?'var(--bad)':''; }
+const U=h=>'0000'+h+'-0000-1000-8000-00805f9b34fb';
+const OPT=['fff0','ffe0','ffe5','fe00','ae00','abf0','18f0','1800','1801','180a'].map(U).concat(['e7810a71-73ae-499d-8c15-faa9aef0c3f2','49535343-fe7d-4ae5-8fa9-9fafd205e455','6e400001-b5a3-f393-e0a9-e50e24dcca9e']);
+let dev=null,wr=null,nf=null,buf='',pend=null,running=false,tStart=0,count=0,errs=0,suf='1',wake=null;
+const dec=new TextDecoder(), enc=new TextEncoder();
+const last={rpm:null,spd:null,ped:null,ld:null,maf:null,tmp:null}; const rows=[['ms','giri','velocita','pedale','carico','maf','liquido','lat','lon','quota_gps','vel_gps']];
+let gps={lat:'',lon:'',alt:'',v:''}, gpsId=null;
+function gpsMsg(e){ return e.code===1?'PERMESSO NEGATO':e.code===2?'POSIZIONE SPENTA':e.code===3?'NESSUN SEGNALE':'ERRORE'; }
+function startGps(){ if(gpsId!==null){ try{navigator.geolocation.clearWatch(gpsId);}catch(e){} gpsId=null; }
+  if(!navigator.geolocation){ $('v_gps').textContent='ASSENTE'; log('GPS non disponibile in questo browser'); return; }
+  try{ $('v_gps').textContent='cerco…'; gpsId=navigator.geolocation.watchPosition(p=>{ $('v_gps').textContent='OK'; gps={lat:p.coords.latitude.toFixed(6),lon:p.coords.longitude.toFixed(6),alt:p.coords.altitude==null?'':Math.round(p.coords.altitude),v:p.coords.speed==null?'':(p.coords.speed*3.6).toFixed(1)}; },e=>{ $('v_gps').textContent=gpsMsg(e); log('GPS errore '+e.code+': '+e.message); if(e.code!==1) setTimeout(startGps,8000); },{enableHighAccuracy:true,maximumAge:0,timeout:30000}); log('GPS richiesto'); }catch(e){ $('v_gps').textContent='ERRORE'; log('GPS errore: '+e.message); } }
+
+function onData(e){ buf+=dec.decode(e.target.value); if(buf.indexOf('>')>=0){ const r=buf; buf=''; if(pend){ const p=pend; pend=null; clearTimeout(p.to); p.res(r.replace(/>/g,'').replace(/\r/g,'\n').replace(/\n+/g,'\n').trim()); } } }
+async function send(s){ const b=enc.encode(s+'\r'); for(let i=0;i<b.length;i+=20){ const c=b.slice(i,i+20); if(wr.properties.writeWithoutResponse) await wr.writeValueWithoutResponse(c); else await wr.writeValue(c);} }
+function cmd(s,ms=1500){ return new Promise(async res=>{ buf=''; pend={res,to:setTimeout(()=>{pend=null;res('TIMEOUT')},ms)}; try{await send(s);}catch(e){clearTimeout(pend.to);pend=null;res('ERR '+e.message);} }); }
+
+// righe di risposta: con intestazioni (ATH1) "7E8064100FE7FB813", senza "4100FE7FB813"
+function lines(resp){ return resp.split('\n').map(l=>l.replace(/\s/g,'').toUpperCase()).filter(l=>/^[0-9A-F]+$/.test(l)&&l.length>=4); }
+function parse(resp,pid,n){ for(const l of lines(resp)){ const k='41'+pid; const i=l.indexOf(k); if(i<0||i>5) continue; const d=l.substr(i+k.length,n*2); if(d.length<n*2) continue; const a=[]; for(let j=0;j<n;j++) a.push(parseInt(d.substr(j*2,2),16)); return a; } return null; }
+function headerOf(resp,pid){ for(const l of lines(resp)){ const i=l.indexOf('41'+pid); if(i===5) return l.slice(0,3); } return null; }
+
+const FAST=[['010C','rpm',2,a=>Math.round((a[0]*256+a[1])/4),'v_rpm'],['010D','spd',1,a=>a[0],'v_spd'],['0149','ped',1,a=>Math.round(a[0]*100/255),'v_ped'],['0110','maf',2,a=>+((a[0]*256+a[1])/100).toFixed(2),'v_maf']];
+const SLOW=[['0104','ld',1,a=>Math.round(a[0]*100/255),'v_ld'],['0105','tmp',1,a=>a[0]-40,'v_tmp']];
+async function read(p){ const [c,key,n,f,id]=p; let r=await cmd(c+suf,1200); if(suf&&r.indexOf('?')>=0){ suf=''; log('Il dongle non accetta la risposta singola, torno al modo normale'); r=await cmd(c,1200); }
+  const a=parse(r,c.slice(2),n); count++;
+  if(a){ last[key]=f(a); $(id).textContent=last[key]; rows.push([Date.now()-t0,last.rpm,last.spd,last.ped,last.ld,last.maf,last.tmp,gps.lat,gps.lon,gps.alt,gps.v]); }
+  else { errs++; if(errs<=15) log(c+' -> '+r.replace(/\n/g,' | ')); } }
+
+async function loop(){ running=true; tStart=Date.now(); count=0; errs=0; let cyc=0, lastSum=Date.now();
+  while(running){ for(const p of FAST){ if(!running) break; await read(p); }
+    if(cyc%4===0) for(const p of SLOW){ if(!running) break; await read(p); }
+    cyc++; const el=(Date.now()-tStart)/1000; $('rate').textContent='Letture al secondo: '+(count/el).toFixed(1);
+    if(Date.now()-lastSum>5000){ lastSum=Date.now(); log('['+el.toFixed(0)+' s] '+(count/el).toFixed(1)+'/s err '+errs+' | giri '+last.rpm+' vel '+last.spd+' ped '+last.ped+' carico '+last.ld+' MAF '+last.maf+' T '+last.tmp); } }
+}
+async function connect(){
+  if(!navigator.bluetooth){ status('Questo browser non supporta Web Bluetooth. Usa Chrome su Android.',true); log('navigator.bluetooth assente'); return; }
+  try{
+    status('Scelta del dispositivo…'); dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:OPT});
+    log('Dispositivo: '+dev.name+' ('+dev.id+')'); dev.addEventListener('gattserverdisconnected',()=>{log('DISCONNESSO dopo '+((Date.now()-tStart)/1000).toFixed(0)+' s di letture'); if(state==='run'){ log('Dongle spento: salvo da solo'); finish(true); } });
+    status('Collegamento GATT…'); const srv=await dev.gatt.connect(); log('GATT collegato');
+    const svcs=await srv.getPrimaryServices(); wr=null; nf=null;
+    for(const s of svcs){ let cs=[]; try{cs=await s.getCharacteristics();}catch(e){}
+      for(const c of cs){ if(!nf && (c.properties.notify||c.properties.indicate) && !/^0000(18|2a)/.test(c.uuid)) nf=c;
+        if(!wr && (c.properties.write||c.properties.writeWithoutResponse) && !/^0000(18|2a)/.test(c.uuid)) wr=c; } }
+    if(!nf||!wr){ status('Collegato, ma non trovo i canali dati. Copia il log e mandamelo.',true); return; }
+    log('Canale dati '+nf.uuid); await nf.startNotifications(); nf.addEventListener('characteristicvaluechanged',onData);
+    try{ wake=await navigator.wakeLock.request('screen'); log('Schermo tenuto acceso'); }catch(e){ log('Schermo non bloccabile: tienilo acceso a mano'); }
+    status('Collegato. Inizializzo…');
+    for(const c of ['ATZ','ATE0','ATL0','ATS0','ATSP0']){ const r=await cmd(c,c==='ATZ'?2500:1500); log(c+' -> '+r.replace(/\n/g,' | ')); }
+    await cmd('ATH1',1500); const r0=await cmd('0100',8000); log('0100 (con intestazioni) -> '+r0.replace(/\n/g,' | '));
+    if(!/41/.test(r0)){ status('Il dongle risponde ma l\'auto no. Auto accesa? Copia il log.',true); return; }
+    const rm=await cmd('0110',2500); const h=headerOf(rm,'10'); log('0110 -> '+rm.replace(/\n/g,' | ')+'  | centralina motore: '+(h||'non trovata'));
+    if(h){ const a=await cmd('ATCRA'+h,1500); log('ATCRA'+h+' -> '+a); }
+    await cmd('ATH0',1500);
+    status('REGISTRO. Guida tranquillo. A fine giro premi FINE E SALVA.'); loop();
+  }catch(e){ status('Errore: '+e.message,true); log('ERRORE '+e.name+': '+e.message); }
+}
+const pad=n=>String(n).padStart(2,'0');
+const stamp=()=>{const d=new Date();return d.getFullYear()+pad(d.getMonth()+1)+pad(d.getDate())+'-'+pad(d.getHours())+pad(d.getMinutes());};
+function fileText(){ return rows.map(r=>r.join(',')).join('\n')+'\n# t0_epoch_ms='+t0+'\n# inizio_locale='+new Date(t0).toString()+'\n'+logEl.textContent.split('\n').filter(Boolean).map(l=>'# '+l).join('\n')+'\n'; }
+function saveFile(name,text,type){ try{ const u=URL.createObjectURL(new Blob([text],{type})); const a=document.createElement('a'); a.href=u; a.download=name; document.body.appendChild(a); a.click(); a.remove(); setTimeout(()=>URL.revokeObjectURL(u),4000); return true; }catch(e){ return false; } }
+let saved=false, state='idle';
+function doSave(){ if(rows.length<2){ status('Nessun dato da salvare.',true); return; } const ok=saveFile('giro-'+stamp()+'.csv',fileText(),'text/csv'); saved=ok; status(ok?'FILE SALVATO ('+(rows.length-1)+' letture). Lo trovi in Download.':'Salvataggio non riuscito: premi ancora.',!ok); }
+function backup(){ try{ localStorage.setItem('giro_backup',JSON.stringify({t:Date.now(),rows:rows,log:logEl.textContent})); }catch(e){} }
+setInterval(()=>{ if(running) backup(); },15000);
+function finish(auto){ running=false; try{navigator.geolocation.clearWatch(gpsId);}catch(e){} try{wake&&wake.release();}catch(e){} try{dev&&dev.gatt.connected&&dev.gatt.disconnect();}catch(e){}
+  state='done'; backup(); $('go').textContent='SALVA DI NUOVO'; $('go').classList.remove('big'); $('go').classList.add('big'); if(!saved) doSave(); }
+$('go').onclick=async()=>{
+  if(state==='idle'){ state='run'; saved=false; $('go').textContent='FINE E SALVA'; await connect(); if(!running && state==='run' && !(dev&&dev.gatt&&dev.gatt.connected)){ state='idle'; $('go').textContent='AVVIA'; } }
+  else if(state==='run'){ finish(false); }
+  else { doSave(); }
+};
+try{ const b=JSON.parse(localStorage.getItem('giro_backup')||'null'); if(b&&b.rows&&b.rows.length>20){ $('rec').hidden=false; $('rec').textContent='Recupera il giro precedente ('+new Date(b.t).toLocaleString('it-IT')+')'; $('rec').onclick=()=>{ rows.length=0; b.rows.forEach(r=>rows.push(r)); logEl.textContent=b.log||''; doSave(); }; } }catch(e){}
+$('gpsbox').onclick=startGps; startGps();
+log('Pagina pronta (v3). Web Bluetooth '+(navigator.bluetooth?'disponibile':'NON disponibile')+'. Contesto sicuro: '+window.isSecureContext);
+</script></body></html>
